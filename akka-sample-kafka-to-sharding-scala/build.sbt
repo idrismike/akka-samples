@@ -60,7 +60,7 @@ lazy val processor = project
       "ch.qos.logback" % "logback-classic" % LogbackVersion,
       "com.typesafe.akka" %% "akka-actor-testkit-typed" % AkkaVersion % Test,
       "org.scalatest" %% "scalatest" % "3.0.8" % Test))
-
+  .dependsOn(producer)
 lazy val producer = project
   .in(file("producer"))
   .settings(PB.targets in Compile := Seq(scalapb.gen() -> (sourceManaged in Compile).value))

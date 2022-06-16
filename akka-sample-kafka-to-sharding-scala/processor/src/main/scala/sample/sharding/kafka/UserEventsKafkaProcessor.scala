@@ -4,7 +4,6 @@ import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.Try
-
 import akka.Done
 import akka.actor.Scheduler
 import akka.actor.typed.scaladsl.AskPattern._
@@ -20,9 +19,12 @@ import akka.kafka.CommitterSettings
 import akka.kafka.Subscriptions
 import akka.pattern.retry
 import org.slf4j.LoggerFactory
-import sample.sharding.kafka.serialization.UserPurchaseProto
+import sample.sharding.kafka.serialization.user_events.UserPurchaseProto
 
-object UserEventsKafkaProcessor {
+import scala.collection.mutable
+
+object UserEventsKafkaProcessor extends cacheForTests {
+  val producerEventsByPartition = mutable.HashMap.empty[Int, mutable.Set[UserPurchaseProto]]
 
   sealed trait Command
 
@@ -68,6 +70,7 @@ object UserEventsKafkaProcessor {
       // MapAsync and Retries can be replaced by reliable delivery
       .mapAsync(20) { record =>
         logger.info(s"user id consumed kafka partition ${record.key()}->${record.partition()}")
+        addToCache(record.partition(), UserPurchaseProto.parseFrom(record.value()), producerEventsByPartition)
         retry(() =>
           shardRegion.ask[Done](replyTo => {
             val purchaseProto = UserPurchaseProto.parseFrom(record.value())

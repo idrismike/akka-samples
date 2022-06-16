@@ -1,40 +1,33 @@
 package sample.sharding.kafka
 
+import akka.Done
 import akka.actor.typed.scaladsl.adapter._
 import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
 import akka.actor.typed.{ActorRef, ActorSystem, Behavior, Terminated}
 import akka.cluster.typed.{Cluster, SelfUp, Subscribe}
 import akka.http.scaladsl._
 import akka.http.scaladsl.model.{HttpRequest, HttpResponse}
+import akka.kafka.scaladsl.Producer
 import akka.management.scaladsl.AkkaManagement
 import akka.stream.Materializer
+import akka.stream.scaladsl.Source
 import com.typesafe.config.{Config, ConfigFactory}
+import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.utils.Utils
+import sample.sharding.kafka.serialization.user_events.UserPurchaseProto
+import sharding.kafka.producer.EventsProducer
+import sharding.kafka.producer.UserEventProducer.{log, maxPrice, maxQuantity, nrUsers, producerConfig, producerSettings, products}
 
+import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 import scala.concurrent.Future
-import scala.util.{Failure, Success}
-
+import scala.concurrent.duration.DurationInt
+import scala.util.{Failure, Random, Success}
 sealed trait Command
 case object NodeMemberUp extends Command
 final case class ShardingStarted(region: ActorRef[UserEvents.Command]) extends Command
 final case class BindingFailed(reason: Throwable) extends Command
-
-object Main {
-  def main(args: Array[String]): Unit = {
-
-    def isInt(s: String): Boolean = s.matches("""\d+""")
-
-    args.toList match {
-      case single :: Nil if isInt(single) =>
-        val nr = single.toInt
-        init(2550 + nr, 8550 + nr, 8080 + nr)
-      case portString :: managementPort :: frontEndPort :: Nil
-          if isInt(portString) && isInt(managementPort) && isInt(frontEndPort) =>
-        init(portString.toInt, managementPort.toInt, frontEndPort.toInt)
-      case _ =>
-        throw new IllegalArgumentException("usage: <remotingPort> <managementPort> <frontEndPort>")
-    }
-  }
-
+class ProcessRunner{
   def init(remotingPort: Int, akkaManagementPort: Int, frontEndPort: Int): Unit = {
     ActorSystem(Behaviors.setup[Command] {
       ctx =>
@@ -111,4 +104,83 @@ object Main {
        """).withFallback(ConfigFactory.load())
 
   }
+  def isInt(s: String): Boolean = s.matches("""\d+""")
+
 }
+
+object ProcessorActor extends ProcessRunner {
+  final case class Start(args:Array[String])
+  def apply(): Behavior[Start] =
+    Behaviors.receiveMessage{message =>
+      println(s"Starting runner")
+      startRunner(message.args)
+      Behaviors.same
+    }
+
+  def startRunner(args: Array[String]) = {
+    args.toList match {
+      case single :: Nil if isInt(single) =>
+        val nr = single.toInt
+        init(2550 + nr, 8550 + nr, 8080 + nr)
+      case portString :: managementPort :: frontEndPort :: Nil
+        if isInt(portString) && isInt(managementPort) && isInt(frontEndPort) =>
+        init(portString.toInt, managementPort.toInt, frontEndPort.toInt)
+      case _ =>
+        throw new IllegalArgumentException("usage: <remotingPort> <managementPort> <frontEndPort>")
+    }
+  }
+}
+trait cacheForTests {
+  def addToCache(partition:Int, message:UserPurchaseProto, map:mutable.HashMap[Int, mutable.Set[UserPurchaseProto]]) = {
+    val ex = map.getOrElse(partition, mutable.Set[UserPurchaseProto]())
+    ex.+=(message)
+    map.put(partition, ex)
+  }
+}
+object ProducerActor extends EventsProducer {
+  final case class Start(args:Array[String])
+  def apply(): Behavior[Start] =
+    Behaviors.receiveMessage{message =>
+      println(s"Starting runner")
+      val done: Future[Done] =
+        Source//(1 to 10000)
+          .tick(1.second, 5.millis, "tick")
+          .map(_ => {
+            val randomEntityId = Random.nextInt(nrUsers).toString
+            val price = Random.nextInt(maxPrice)
+            val quantity = Random.nextInt(maxQuantity)
+            val product = products(Random.nextInt(products.size))
+            val messageObj = UserPurchaseProto(randomEntityId, product, quantity, price)
+            val message = messageObj.toByteArray
+            log.info("Sending message to user {}", randomEntityId)
+            // rely on the default kafka partitioner to hash the key and distribute among shards
+            // the logic of the default partitioner must be replicated in MessageExtractor entityId -> shardId function
+            new ProducerRecord[String, Array[Byte]](producerConfig.topic, randomEntityId, message)
+          })
+          .runWith(Producer.plainSink(producerSettings))
+
+      Behaviors.same
+    }
+}
+
+/*object Main extends ProcessRunner {
+  def main(args: Array[String]): Unit = {
+    val testkit = ActorTestKit()
+    val system: ActorSystem[ProcessorActor.Start] = ActorSystem(ProcessorActor(), "processor")
+    system ! ProcessorActor.Start(Array())
+    Thread.sleep(5000)
+    system ! ProcessorActor.Start(Array())
+    Thread.sleep(5000)
+
+    /*args.toList match {
+      case single :: Nil if isInt(single) =>
+        val nr = single.toInt
+        init(2550 + nr, 8550 + nr, 8080 + nr)
+      case portString :: managementPort :: frontEndPort :: Nil
+          if isInt(portString) && isInt(managementPort) && isInt(frontEndPort) =>
+        init(portString.toInt, managementPort.toInt, frontEndPort.toInt)
+      case _ =>
+        throw new IllegalArgumentException("usage: <remotingPort> <managementPort> <frontEndPort>")
+    }*/
+  }
+}*/

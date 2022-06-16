@@ -6,11 +6,15 @@ import akka.actor.typed.{ActorRef, ActorSystem, Behavior}
 import akka.cluster.sharding.external.ExternalShardAllocationStrategy
 import akka.cluster.sharding.typed.scaladsl.{ClusterSharding, Entity}
 import akka.kafka.cluster.sharding.KafkaClusterSharding
+import sample.sharding.kafka.serialization.user_events.UserPurchaseProto
 
+import scala.collection.mutable
 import scala.concurrent.Future
 import scala.concurrent.duration._
 
-object UserEvents {
+object UserEvents extends cacheForTests {
+  val producerEventsByPartition = mutable.HashMap.empty[Int, mutable.Set[UserPurchaseProto]]
+
   def init(system: ActorSystem[_], settings: ProcessorSettings): Future[ActorRef[Command]] = {
     import system.executionContext
     KafkaClusterSharding(settings.system).messageExtractorNoEnvelope(
@@ -42,6 +46,12 @@ object UserEvents {
     Behaviors.setup { ctx =>
       Behaviors.receiveMessage[Command] {
         case UserPurchase(id, product, quantity, price, ack) =>
+          ctx.log.info(s"${ctx.self.path}")
+          val address = ctx.self.path.toStringWithoutAddress
+          val elems = address.split("/")
+          val partition = elems(elems.length -2)
+          addToCache(partition.toInt, UserPurchaseProto(id, product, quantity, price), producerEventsByPartition)
+          ctx.log.info(s"path is $address, partition is $partition")
           ctx.log.info("user {} purchase {}, quantity {}, price {}", id, product, quantity, price)
           ack.tell(Done)
           running(
